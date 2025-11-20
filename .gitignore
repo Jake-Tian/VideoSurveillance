@@ -1,0 +1,56 @@
+# Models (local model files)
+models/
+
+# Data folder
+data/
+
+# Tests
+tests/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Gradio temporary files
+.gradio_tmp/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.venv
+env/
+venv/
+ENV/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Test coverage
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# Exclude specific utility files with API keys
+utils/chat_gpt.py
+utils/chat_gemini.py
+search.py
