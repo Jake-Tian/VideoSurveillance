@@ -2,7 +2,8 @@
 
 import os
 # Set Gradio temp directory to avoid permission issues with /tmp/gradio/
-os.environ["GRADIO_TEMP_DIR"] = "/research/d7/gds/yztian25/VideoSurv/.gradio_tmp"
+os.environ["GRADIO_TEMP_DIR"] = os.path.join(os.getcwd(), ".gradio_tmp")
+
 
 import json
 import time
@@ -14,13 +15,30 @@ import re
 import html
 import gradio as gr
 from pathlib import Path
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, Any
 
-from surveillance import streaming_process_video
+from surveillance import (
+    streaming_process_video,
+    load_config,
+    resolve_prompt,
+    load_model_functions,
+    build_message_kwargs,
+)
 from search import response as search_response
 from utils.prompts import prompt_violence_detection, prompt_falling_detection
 
 DATA_JSONL_PATH = "data/data.jsonl"
+CONFIG_DIRS = [Path("configs"), Path("gemini-configs"), Path("gpt-configs")]
+
+
+def list_config_files() -> List[str]:
+    """Return available config files across known config directories."""
+    config_paths = []
+    for cfg_dir in CONFIG_DIRS:
+        if not cfg_dir.exists():
+            continue
+        config_paths.extend(sorted(str(p) for p in cfg_dir.glob("*.json")))
+    return config_paths
 
 
 def load_video_data(jsonl_path: str) -> Dict[str, List]:
@@ -56,18 +74,82 @@ def get_detection_prompt(detection_type: str):
     return prompt_violence_detection
 
 
-def process_clip_worker(clip, output_path, prompt, result_queue, clip_idx, total_clips):
+def normalize_response_lines(response: Any) -> List[str]:
+    """Convert any response payload into a list of strings for display."""
+    if response is None:
+        return []
+    if isinstance(response, list):
+        if all(isinstance(item, dict) for item in response):
+            return [json.dumps(item, ensure_ascii=False) for item in response]
+        return [json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item) for item in response]
+    if isinstance(response, dict):
+        return [json.dumps(response, ensure_ascii=False)]
+    return [str(response)]
+
+
+def load_config_bundle(config_path: str, detection_type: str = "") -> Dict[str, Any]:
+    """Prepare config details (prompt/model/message kwargs) for processing."""
+    config = load_config(config_path)
+    prompt_type, prompt_text = resolve_prompt(config.get("prompt"))
+
+    if detection_type and detection_type.strip():
+        prompt_type = "custom"
+        prompt_text = get_detection_prompt(detection_type)
+
+    model_key = config.get("model", "gemini")
+    generate_messages, get_response = load_model_functions(model_key)
+    output_cfg = config.get("output", {"format": "python_list"})
+    message_kwargs = build_message_kwargs(config.get("video"))
+    paths_cfg = config.get("paths", {})
+    clip_path = paths_cfg.get("clip_path")
+    output_path = paths_cfg.get("output_path")
+    if not clip_path or not output_path:
+        raise ValueError("Config must specify paths.clip_path and paths.output_path")
+
+    metadata = {
+        "config_name": config.get("name"),
+        "model": model_key,
+        "prompt_type": prompt_type,
+        "output_format": output_cfg.get("format", "python_list"),
+        "config_path": config_path,
+    }
+
+    return {
+        "config": config,
+        "prompt_text": prompt_text,
+        "clip_path": clip_path,
+        "output_path": output_path,
+        "output_cfg": output_cfg,
+        "message_kwargs": message_kwargs,
+        "metadata": metadata,
+        "generate_messages": generate_messages,
+        "get_response": get_response,
+    }
+
+
+def process_clip_worker(clip, output_path, prompt, result_queue, clip_idx, total_clips, config_bundle):
     """Worker function to process a clip in a separate thread."""
     try:
-        response = streaming_process_video(clip, output_path, prompt)
+        response = streaming_process_video(
+            clip,
+            output_path,
+            prompt,
+            config_bundle["generate_messages"],
+            config_bundle["get_response"],
+            config_bundle["output_cfg"],
+            config_bundle["message_kwargs"],
+            config_bundle["metadata"],
+        )
         result_queue.put(('result', clip_idx, response))
     except Exception as e:
         result_queue.put(('error', clip_idx, str(e)))
 
 
-def run_surveillance(clip_path: str, output_path: str, prompt: str):
-    """Process all clips in clip_path and save results to output_path. Yields progress updates.
-    Processes clips in parallel: prints results from one clip while processing the next."""
+def run_surveillance(config_bundle: Dict[str, Any]):
+    """Process clips defined by the config bundle and yield UI updates."""
+    clip_path = config_bundle["clip_path"]
+    output_path = config_bundle["output_path"]
+    prompt = config_bundle["prompt_text"]
     start_time = time.time()
     
     # Get all video clips in the clip_path directory
@@ -84,8 +166,6 @@ def run_surveillance(clip_path: str, output_path: str, prompt: str):
     if output_path_obj.exists():
         output_path_obj.unlink()
     
-    all_responses = []
-    processed_count = 0
     total_clips = len(clips)
     
     # Initial message
@@ -94,8 +174,19 @@ def run_surveillance(clip_path: str, output_path: str, prompt: str):
     output_lines.append("")
     yield "\n".join(output_lines)
     
-    # Queue to receive results from worker threads
     result_queue = queue.Queue()
+    pending_results: Dict[int, Tuple[str, Any]] = {}
+
+    def fetch_result(target_idx: int) -> Tuple[str, Any]:
+        """Fetch result for a specific clip index, buffering others."""
+        if target_idx in pending_results:
+            msg_type, result = pending_results.pop(target_idx)
+            return msg_type, result
+        while True:
+            msg_type, result_clip_idx, result = result_queue.get()
+            if result_clip_idx == target_idx:
+                return msg_type, result
+            pending_results[result_clip_idx] = (msg_type, result)
     
     # Process clips with overlapping: print results from clip N while processing clip N+1
     previous_result = None
@@ -109,66 +200,56 @@ def run_surveillance(clip_path: str, output_path: str, prompt: str):
         if clip_idx == 1:
             thread = threading.Thread(
                 target=process_clip_worker,
-                args=(clip, output_path, prompt, result_queue, clip_idx, total_clips)
+                args=(clip, output_path, prompt, result_queue, clip_idx, total_clips, config_bundle)
             )
             thread.start()
             thread.join()  # Wait for first clip to complete
             
             # Get first clip's result
-            while True:
-                msg_type, result_clip_idx, result = result_queue.get()
-                if result_clip_idx == 1 and msg_type == 'result':
-                    previous_result = result
-                    previous_clip_idx = 1
-                    break
-                else:
-                    # Put it back if it's not the one we're waiting for
-                    result_queue.put((msg_type, result_clip_idx, result))
+            msg_type, result = fetch_result(1)
+            if msg_type == 'result':
+                previous_result = result
+                previous_clip_idx = 1
+            else:
+                yield f"Error processing clip 1: {result}"
+                return
         
         # For subsequent clips: start processing current clip, then print previous result
         else:
             # Start processing current clip in a background thread
             thread = threading.Thread(
                 target=process_clip_worker,
-                args=(clip, output_path, prompt, result_queue, clip_idx, total_clips)
+                args=(clip, output_path, prompt, result_queue, clip_idx, total_clips, config_bundle)
             )
             thread.start()
             
             # Print previous clip's results while current clip is processing
             if previous_result is not None:
-                response = previous_result
-                all_responses.extend(response)
-                processed_count += 1
+                response_lines = normalize_response_lines(previous_result)
                 
-                # Start building the clip block incrementally
                 clip_block_start = f"""<div class='clip-block'>
                 <div class='clip-header'>Clip {previous_clip_idx}/{total_clips}</div>
                 <div class='clip-content'><ul>
                 """
                 clip_items = []
                 
-                # Add each response line one by one with a 1-second pause
-                for idx, line in enumerate(response):
-                    # Escape HTML in the line content
-                    escaped_line = html.escape(line)
-                    # Check if first element includes "WARNING:"
-                    if idx == 0 and "WARNING:" in line:
-                        escaped_line = "⚠️⚠️ " + escaped_line
-                        clip_items.append(f"<li class='warning-line'>{escaped_line}</li>")
-                    else:
-                        clip_items.append(f"<li>{escaped_line}</li>")
-                    
-                    # Build the current state of the clip block
-                    current_clip_html = clip_block_start + ''.join(clip_items) + "</ul></div></div>"
-                    
-                    # Prepend the clip block to output_lines (latest on top)
-                    current_output = [current_clip_html] + output_lines
-                    yield "\n".join(current_output)
-                    time.sleep(1)  # Pause for 1 second between each line
+                if not response_lines:
+                    clip_items.append("<li>No response generated.</li>")
+                else:
+                    for idx, line in enumerate(response_lines):
+                        escaped_line = html.escape(line)
+                        if idx == 0 and "WARNING:" in line:
+                            escaped_line = "⚠️⚠️ " + escaped_line
+                            clip_items.append(f"<li class='warning-line'>{escaped_line}</li>")
+                        else:
+                            clip_items.append(f"<li>{escaped_line}</li>")
+                        
+                        current_clip_html = clip_block_start + ''.join(clip_items) + "</ul></div></div>"
+                        current_output = [current_clip_html] + output_lines
+                        yield "\n".join(current_output)
+                        time.sleep(1)
                 
-                # Final clip block
                 clip_block_html = clip_block_start + ''.join(clip_items) + "</ul></div></div>"
-                # Prepend to output_lines (latest on top)
                 output_lines.insert(0, clip_block_html)
                 yield "\n".join(output_lines)
             
@@ -176,68 +257,73 @@ def run_surveillance(clip_path: str, output_path: str, prompt: str):
             thread.join()
             
             # Get current clip's result
-            while True:
-                msg_type, result_clip_idx, result = result_queue.get()
-                if result_clip_idx == clip_idx and msg_type == 'result':
-                    previous_result = result
-                    previous_clip_idx = clip_idx
-                    break
-                else:
-                    # Put it back if it's not the one we're waiting for
-                    result_queue.put((msg_type, result_clip_idx, result))
+            msg_type, result = fetch_result(clip_idx)
+            if msg_type == 'result':
+                previous_result = result
+                previous_clip_idx = clip_idx
+            else:
+                yield f"Error processing clip {clip_idx}: {result}"
+                return
     
-    # Print the last clip's results (if we have it stored)
     if previous_result is not None and previous_clip_idx == len(clips):
-        response = previous_result
-        all_responses.extend(response)
-        processed_count += 1
+        response_lines = normalize_response_lines(previous_result)
         
-        # Start building the clip block incrementally
         clip_block_start = f"""<div class='clip-block'>
         <div class='clip-header'>Clip {previous_clip_idx}/{total_clips}</div>
         <div class='clip-content'><ul>
         """
         clip_items = []
         
-        # Add each response line one by one with a 1-second pause
-        for idx, line in enumerate(response):
-            # Escape HTML in the line content
-            escaped_line = html.escape(line)
-            # Check if first element includes "WARNING:"
-            if idx == 0 and "WARNING:" in line:
-                escaped_line = "⚠️⚠️ " + escaped_line
-                clip_items.append(f"<li class='warning-line'>{escaped_line}</li>")
-            else:
-                clip_items.append(f"<li>{escaped_line}</li>")
-            
-            # Build the current state of the clip block
-            current_clip_html = clip_block_start + ''.join(clip_items) + "</ul></div></div>"
-            
-            # Prepend the clip block to output_lines (latest on top)
-            current_output = [current_clip_html] + output_lines
-            yield "\n".join(current_output)
-            time.sleep(1)  # Pause for 1 second between each line
+        if not response_lines:
+            clip_items.append("<li>No response generated.</li>")
+        else:
+            for idx, line in enumerate(response_lines):
+                escaped_line = html.escape(line)
+                if idx == 0 and "WARNING:" in line:
+                    escaped_line = "⚠️⚠️ " + escaped_line
+                    clip_items.append(f"<li class='warning-line'>{escaped_line}</li>")
+                else:
+                    clip_items.append(f"<li>{escaped_line}</li>")
+                
+                current_clip_html = clip_block_start + ''.join(clip_items) + "</ul></div></div>"
+                current_output = [current_clip_html] + output_lines
+                yield "\n".join(current_output)
+                time.sleep(1)
         
-        # Final clip block
         clip_block_html = clip_block_start + ''.join(clip_items) + "</ul></div></div>"
-        # Prepend to output_lines (latest on top)
         output_lines.insert(0, clip_block_html)
         yield "\n".join(output_lines)
 
 
-def start_analysis(video_id: str, detection_type: str, video_data: Dict[str, List]):
-    """Run surveillance analysis on all clips. Yields incremental progress."""
+def start_analysis(video_id: str, detection_type: str, video_data: Dict[str, List], config_path: str):
+    """Run surveillance analysis with the selected config."""
+    if not config_path:
+        yield "Please select a config file."
+        return
+    
     if not video_id or video_id not in video_data:
         yield "Please select a video."
         return
     
-    video_path, clip_path, output_path = video_data[video_id]
+    try:
+        config_bundle = load_config_bundle(config_path, detection_type)
+    except Exception as exc:
+        yield f"Error loading config: {exc}"
+        return
     
-    # Get the appropriate prompt based on detection type
-    prompt = get_detection_prompt(detection_type)
+    _, expected_clip_path, expected_output_path = video_data[video_id]
+    clip_path = config_bundle["clip_path"]
+    output_path = config_bundle["output_path"]
     
-    # Process all clips and yield incremental output
-    for output in run_surveillance(clip_path, output_path, prompt):
+    if (expected_clip_path and os.path.normpath(expected_clip_path) != os.path.normpath(clip_path)) or (
+        expected_output_path and os.path.normpath(expected_output_path) != os.path.normpath(output_path)
+    ):
+        yield (
+            "Warning: Selected video's clip/output paths differ from the config. "
+            "Proceeding with paths defined in the config."
+        )
+    
+    for output in run_surveillance(config_bundle):
         yield output
 
 
@@ -354,6 +440,9 @@ def build_interface() -> gr.Blocks:
     # Get default values
     default_id = video_ids[0] if video_ids else ""
     default_video_path, default_clip_path, default_output_path = video_data[default_id]
+    
+    config_choices = list_config_files()
+    default_config = config_choices[0] if config_choices else ""
     
     # Custom CSS for professional light theme design
     custom_css = """
@@ -556,6 +645,7 @@ def build_interface() -> gr.Blocks:
     }
     
     .clip-content li {
+        color: var(--text) !important;
         margin-bottom: 8px !important;
     }
     
@@ -598,6 +688,13 @@ def build_interface() -> gr.Blocks:
                 label="Select Video",
                 info="Choose a video to process"
             )
+            config_dropdown = gr.Dropdown(
+                choices=config_choices,
+                value=default_config,
+                label="Select Config",
+                info="Choose an experiment config (JSON)",
+                allow_custom_value=True
+            )
             detection_type_input = gr.Textbox(
                 label="Anomaly Detection Type",
                 placeholder="e.g., violence, crime, fall, fell, strip",
@@ -607,9 +704,9 @@ def build_interface() -> gr.Blocks:
             start_button = gr.Button("START", variant="primary", size="lg")
         
         # Create wrapper functions that capture video_data
-        def start_analysis_wrapper(vid, detection_type):
+        def start_analysis_wrapper(vid, detection_type, config_path):
             # Yield from the generator to properly stream output
-            for output in start_analysis(vid, detection_type, video_data):
+            for output in start_analysis(vid, detection_type, video_data, config_path):
                 yield output
         
         def update_video_player_wrapper(vid):
@@ -622,7 +719,7 @@ def build_interface() -> gr.Blocks:
                 video_player = gr.Video(
                     label="Video Player",
                     value=default_video_path,
-                    autoplay=False,
+                    autoplay=True,
                 )
             
             # Right side: Model output
@@ -634,7 +731,7 @@ def build_interface() -> gr.Blocks:
 
         start_button.click(
             fn=start_analysis_wrapper,
-            inputs=[video_id_dropdown, detection_type_input],
+            inputs=[video_id_dropdown, detection_type_input, config_dropdown],
             outputs=[output_text],  # Only output to output_text, video player disconnected
         )
         
@@ -695,12 +792,12 @@ def build_interface() -> gr.Blocks:
 
 if __name__ == "__main__":
     interface = build_interface()
-    interface.launch (
-        server_name="137.189.88.116",
+    interface.launch(
+        server_name="127.0.0.1",
+        # server_port=7860,
         share=False,
         show_error=False,
         quiet=False,
         inbrowser=True,
         favicon_path=None
     )
-

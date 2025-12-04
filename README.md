@@ -125,10 +125,20 @@ client = OpenAI(
 python -m surveillance
 ```
 
-Modify the `__main__` block in `surveillance.py` to specify:
-- `clip_path`: Directory containing video clips
-- `output_path`: Output JSONL file path
-- Detection prompt (violence or falling)
+By default the script reads `configs/falling_default.json`, which specifies:
+- `paths.clip_path`: Directory containing video clips
+- `paths.output_path`: Output JSONL file path
+- `prompt` and `model`: Detection prompt (violence/falling/custom) and model backend
+
+### Configuration-Driven Experiments
+
+You can now run experiments by pointing `surveillance.py` to a JSON config file:
+
+```bash
+python -m surveillance --config configs/falling_default.json
+```
+
+Use `--config` to switch between them as you collect latency/cost/quality metrics.
 
 ## Output Format
 
@@ -162,5 +172,3 @@ VideoSurv/
 └── models/
     └── Qwen2.5-Omni-7B/   # AI model files
 ```
-
-
