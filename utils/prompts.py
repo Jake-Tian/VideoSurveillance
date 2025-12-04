@@ -23,7 +23,7 @@ Checklist:
 - [] Generate a python list. 
 - [] No duplicate or near-duplicate sentences.
 - [] Each element is a single sentence.
-- [] Less than or equal to 10 sentences.
+- [] Less than or equal to 6 sentences.
 """
 
 # 2. If you observe suspicious behavior that MIGHT indicate violence (e.g., someone reaching for something, aggressive postures, threatening gestures, demands that seem coercive), add a sentence starting with "SUSPECTED: " followed by the description.
@@ -40,6 +40,7 @@ Falling-down Reporting Rules:
 1. If you observe someone falls down, you MUST add a sentence starting with "WARNING: " followed by a detailed description. Place this as the FIRST element in your output list.
 2. When reporting falling-down, be specific: describe who fell down, what was the reason for falling-down, and the context.
 3. Do not report the following as falling-down: intentional sitting, lying down, controlled movements like kneeling, squatting etc. only report the unexpected falling-down. 
+4. If no falling-down or suspicious behavior is observed in the entire clip, output the sentence "NO WARNING: No falling-down observed." as the first list element and do not invent events.
 
 Then, you need to describe the characters' behavior in the video, including characters' appearance, actions, movements, and spoken dialogue. No need to describe the contextual information. 
 
@@ -60,7 +61,7 @@ Checklist:
 - [] Generate a python list. 
 - [] No duplicate or near-duplicate sentences.
 - [] Each element is a single sentence.
-- [] Less than or equal to 10 sentences.
+- [] Less than or equal to 6 sentences.
 """
 
 

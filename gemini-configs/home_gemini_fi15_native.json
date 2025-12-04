@@ -1,0 +1,21 @@
+{
+  "name": "home_gemini_fi15_native",
+  "model": "gemini",
+  "prompt": {
+    "type": "falling_detection"
+  },
+  "paths": {
+    "clip_path": "data/clips/home/",
+    "output_path": "data/results/home_gemini_fi15_native.jsonl"
+  },
+  "video": {
+    "frame_interval": 15,
+    "frame_size": null
+  },
+  "output": {
+    "format": "python_list"
+  },
+  "run": {
+    "max_clips": null
+  }
+}

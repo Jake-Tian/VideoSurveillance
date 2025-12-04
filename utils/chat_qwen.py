@@ -45,7 +45,7 @@ def get_response(messages):
     return response
 
 
-def generate_messages(video, prompt):
+def generate_messages(video, prompt, **kwargs):
 
     messages = [{
         "role": "system",

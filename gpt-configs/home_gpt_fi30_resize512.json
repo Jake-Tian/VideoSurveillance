@@ -1,0 +1,24 @@
+{
+  "name": "home_gpt_fi30_resize512",
+  "model": "gpt4o",
+  "prompt": {
+    "type": "falling_detection"
+  },
+  "paths": {
+    "clip_path": "data/clips/home/",
+    "output_path": "data/results/home_gpt_fi30_resize512.jsonl"
+  },
+  "video": {
+    "frame_interval": 30,
+    "frame_size": {
+      "width": 512,
+      "height": 512
+    }
+  },
+  "output": {
+    "format": "python_list"
+  },
+  "run": {
+    "max_clips": null
+  }
+}

@@ -3,8 +3,8 @@ from openai import OpenAI
 from utils.prompts import prompt_summarize
 
 client = OpenAI(
-    api_key = "", 
-    base_url = "",
+    api_key = "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", 
+    base_url = "https://openrouter.ai/api/v1"
 )
 
 instruction = """

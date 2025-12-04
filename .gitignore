@@ -49,8 +49,10 @@ htmlcov/
 
 # Logs
 *.log
+*log*
 
 # Exclude specific utility files with API keys
-# utils/chat_gpt.py
-# utils/chat_gemini.py
-# search.py
+utils/chat_gpt.py
+utils/chat_gemini.py
+
+analysis

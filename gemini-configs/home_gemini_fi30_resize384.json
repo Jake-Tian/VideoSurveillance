@@ -1,0 +1,24 @@
+{
+  "name": "home_gemini_fi30_resize384",
+  "model": "gemini",
+  "prompt": {
+    "type": "falling_detection"
+  },
+  "paths": {
+    "clip_path": "data/clips/home/",
+    "output_path": "data/results/home_gemini_fi30_resize384.jsonl"
+  },
+  "video": {
+    "frame_interval": 30,
+    "frame_size": {
+      "width": 384,
+      "height": 384
+    }
+  },
+  "output": {
+    "format": "python_list"
+  },
+  "run": {
+    "max_clips": null
+  }
+}
